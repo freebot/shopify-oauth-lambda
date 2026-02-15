@@ -1,5 +1,4 @@
 const crypto = require("crypto");
-const fetch = require("node-fetch");
 const {
   DynamoDBClient
 } = require("@aws-sdk/client-dynamodb");
