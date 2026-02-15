@@ -38,6 +38,91 @@ exports.handler = async (event) => {
     console.log("QUERY:", query);
 
     // ==========================
+    // 0️⃣ CHECK CONFIG & STATUS
+    // ==========================
+    if (!SHOPIFY_CLIENT_ID || !SHOPIFY_CLIENT_SECRET || !TABLE_NAME) {
+      console.error("Missing environment variables");
+      return htmlResponse(500, "<h1>Configuration Error</h1><p>Missing required environment variables on server.</p>");
+    }
+
+    if (path === "/" || path === "") {
+      const { shop, hmac } = query;
+
+      if (!shop) {
+        return htmlResponse(200, `
+          <html>
+            <body style="font-family: system-ui; padding: 2rem; text-align: center;">
+              <h1>Shopify App Status</h1>
+              <p>Please open this app from the Shopify Admin.</p>
+            </body>
+          </html>
+        `);
+      }
+
+      // If HMAC is present, validate it.
+      if (hmac && !validateHmac(query)) {
+        return htmlResponse(400, "<h1>Security Error</h1><p>Invalid HMAC signature.</p>");
+      }
+
+      // Check installation status in DynamoDB
+      let session = null;
+      try {
+        session = await getSession(shop);
+      } catch (err) {
+        console.error("DynamoDB Error:", err);
+        return htmlResponse(500, "<h1>Database Error</h1><p>Could not verify installation status.</p>");
+      }
+
+      const isInstalled = !!session && !!session.accessToken;
+
+      if (!isInstalled) {
+         // Not installed: Redirect to Auth
+         return redirect(`/auth?shop=${shop}`);
+      }
+
+      // APP IS INSTALLED & RUNNING
+      return htmlResponse(200, `
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <title>App Status</title>
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <style>
+            body { font-family: -apple-system, BlinkMacSystemFont, "San Francisco", "Segoe UI", Roboto, "Helvetica Neue", sans-serif; padding: 20px; background: #f6f6f7; color: #202223; }
+            .card { background: white; border: 1px solid #e1e3e5; border-radius: 8px; padding: 20px; max-width: 600px; margin: 40px auto; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1); }
+            h1 { font-size: 24px; font-weight: 600; margin-bottom: 8px; }
+            p { color: #6d7175; margin-bottom: 24px; }
+            .status-badge { display: inline-flex; align-items: center; padding: 4px 12px; border-radius: 12px; font-weight: 600; font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px; }
+            .status-badge.active { background: #E4F7EB; color: #007D44; border: 1px solid #B7EBCE; }
+            .status-badge.inactive { background: #FFEAEE; color: #B51818; border: 1px solid #FFC9D1; }
+            table { width: 100%; border-collapse: collapse; margin-top: 24px; }
+            td { padding: 12px 0; border-bottom: 1px solid #f1f2f3; font-size: 14px; }
+            td:first-child { font-weight: 500; color: #6d7175; width: 40%; }
+            td:last-child { text-align: right; font-family: monospace; color: #202223; }
+          </style>
+        </head>
+        <body>
+          <div class="card">
+            <h1>App Status</h1>
+            <p>The application is installed and communicating with Shopify APIs.</p>
+            
+            <div style="margin-bottom: 20px;">
+                <span class="status-badge active">● &nbsp; System Operational</span>
+            </div>
+
+            <table>
+                <tr><td>Shop Domain</td><td>${shop}</td></tr>
+                <tr><td>Installed At</td><td>${new Date(session.installedAt).toLocaleString()}</td></tr>
+                <tr><td>Scopes</td><td>${session.scope}</td></tr>
+                <tr><td>Status</td><td>Active</td></tr>
+            </table>
+          </div>
+        </body>
+        </html>
+      `);
+    }
+
+    // ==========================
     // 1️⃣ AUTH
     // ==========================
     if (path === "/auth") {
@@ -223,5 +308,15 @@ function redirect(location) {
     headers: {
       Location: location
     }
+  };
+}
+
+function htmlResponse(statusCode, html) {
+  return {
+    statusCode,
+    headers: {
+      "Content-Type": "text/html"
+    },
+    body: html
   };
 }
