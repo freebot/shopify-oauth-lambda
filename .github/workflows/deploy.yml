@@ -1,4 +1,4 @@
-name: Deploy Lambda
+name: Deploy
 
 on:
   push:
@@ -12,25 +12,3 @@ permissions:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: arn:aws:iam::123456789012:role/github-shopify-deploy
-          aws-region: us-east-1
-
-      - name: Install dependencies
-        run: npm install
-
-      - name: Zip Lambda
-        run: |
-          zip -r function.zip .
-
-      - name: Deploy Lambda
-        run: |
-          aws lambda update-function-code \
-            --function-name shopify-oauth \
-            --zip-file fileb://function.zip
