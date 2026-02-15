@@ -1,13 +1,7 @@
 import crypto from "crypto";
 import fetch from "node-fetch";
-import {
-  DynamoDBClient
-} from "@aws-sdk/client-dynamodb";
-import {
-  DynamoDBDocumentClient,
-  PutCommand,
-  GetCommand
-} from "@aws-sdk/lib-dynamodb";
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import { DynamoDBDocumentClient, PutCommand, GetCommand } from "@aws-sdk/lib-dynamodb";
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
@@ -19,69 +13,18 @@ const {
   TABLE_NAME
 } = process.env;
 
-// =============================
-// 🔒 Utils
-// =============================
-
-function validateShop(shop) {
-  return /^[a-zA-Z0-9][a-zA-Z0-9\-]*\.myshopify\.com$/.test(shop);
-}
-
-function validateHmac(query, secret) {
-  const { hmac, ...rest } = query;
-
-  const message = Object.keys(rest)
-    .sort()
-    .map(key => `${key}=${rest[key]}`)
-    .join("&");
-
-  const generatedHash = crypto
-    .createHmac("sha256", secret)
-    .update(message)
-    .digest();
-
-  const providedHash = Buffer.from(hmac, "hex");
-
-  return (
-    providedHash.length === generatedHash.length &&
-    crypto.timingSafeEqual(generatedHash, providedHash)
-  );
-}
-
-function jsonResponse(statusCode, body) {
-  return {
-    statusCode,
-    headers: {
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify(body)
-  };
-}
-
-// =============================
-// 🚀 Handler
-// =============================
-
 export const handler = async (event) => {
   try {
     const path = event.rawPath;
-    const query = event.queryStringParameters || {};
-
-    // =============================
-    // 🟢 HEALTH CHECK
-    // =============================
-    if (path === "/") {
-      return jsonResponse(200, { status: "ok" });
-    }
 
     // =============================
     // 1️⃣ AUTH
     // =============================
     if (path === "/auth") {
-      const { shop } = query;
+      const shop = event.queryStringParameters?.shop;
 
-      if (!shop || !validateShop(shop)) {
-        return jsonResponse(400, { error: "Invalid shop parameter" });
+      if (!shop) {
+        return response(400, "Missing shop param");
       }
 
       const state = crypto.randomBytes(16).toString("hex");
@@ -95,9 +38,7 @@ export const handler = async (event) => {
 
       return {
         statusCode: 302,
-        headers: {
-          Location: installUrl
-        }
+        headers: { Location: installUrl }
       };
     }
 
@@ -105,14 +46,28 @@ export const handler = async (event) => {
     // 2️⃣ CALLBACK
     // =============================
     if (path === "/callback") {
-      const { shop, code } = query;
+      const { shop, code, hmac } = event.queryStringParameters;
 
-      if (!shop || !code || !validateShop(shop)) {
-        return jsonResponse(400, { error: "Invalid callback parameters" });
+      if (!shop || !code || !hmac) {
+        return response(400, "Missing required parameters");
       }
 
-      if (!validateHmac(query, SHOPIFY_CLIENT_SECRET)) {
-        return jsonResponse(400, { error: "HMAC validation failed" });
+      // 🔐 Validar HMAC
+      const map = { ...event.queryStringParameters };
+      delete map.hmac;
+
+      const message = Object.keys(map)
+        .sort()
+        .map(key => `${key}=${map[key]}`)
+        .join("&");
+
+      const generatedHash = crypto
+        .createHmac("sha256", SHOPIFY_CLIENT_SECRET)
+        .update(message)
+        .digest("hex");
+
+      if (generatedHash !== hmac) {
+        return response(400, "HMAC validation failed");
       }
 
       // 🔄 Intercambiar code por token
@@ -129,90 +84,58 @@ export const handler = async (event) => {
         }
       );
 
+      const rawText = await tokenResponse.text();
+
       if (!tokenResponse.ok) {
-        return jsonResponse(500, {
-          error: "Failed to fetch access token"
-        });
+        console.error("Shopify token error:", rawText);
+        return response(500, `Token exchange failed: ${rawText}`);
       }
 
-      const tokenData = await tokenResponse.json();
+      let tokenData;
+      try {
+        tokenData = JSON.parse(rawText);
+      } catch (err) {
+        console.error("Invalid JSON from Shopify:", rawText);
+        return response(500, "Invalid JSON returned from Shopify");
+      }
+
       const accessToken = tokenData.access_token;
 
-      // 💾 Guardar sesión offline
+      if (!accessToken) {
+        return response(500, "No access_token returned");
+      }
+
+      // 💾 Guardar en DynamoDB
       await ddb.send(
         new PutCommand({
           TableName: TABLE_NAME,
           Item: {
             id: `offline_${shop}`,
-            shop,
             accessToken,
+            shop,
             scope: SHOPIFY_SCOPES,
             isOnline: false,
-            processed_count: 0,
-            installedAt: new Date().toISOString()
+            installedAt: Date.now()
           }
         })
       );
 
-      return jsonResponse(200, {
-        success: true,
-        message: "App instalada correctamente"
-      });
+      return response(200, "App instalada correctamente");
     }
 
-    // =============================
-    // 3️⃣ PRODUCTS (para OpenClaw)
-    // =============================
-    if (path === "/products") {
-      const { shop } = query;
+    return response(404, "Not found");
 
-      if (!shop || !validateShop(shop)) {
-        return jsonResponse(400, { error: "Invalid shop parameter" });
-      }
-
-      // 🔍 Obtener token
-      const session = await ddb.send(
-        new GetCommand({
-          TableName: TABLE_NAME,
-          Key: { id: `offline_${shop}` }
-        })
-      );
-
-      if (!session.Item) {
-        return jsonResponse(404, { error: "Shop not installed" });
-      }
-
-      const token = session.Item.accessToken;
-
-      // 📡 Llamar Shopify Admin API
-      const response = await fetch(
-        `https://${shop}/admin/api/2026-01/products.json`,
-        {
-          headers: {
-            "X-Shopify-Access-Token": token,
-            "Content-Type": "application/json"
-          }
-        }
-      );
-
-      if (!response.ok) {
-        return jsonResponse(response.status, {
-          error: "Shopify API error"
-        });
-      }
-
-      const data = await response.json();
-
-      return jsonResponse(200, data);
-    }
-
-    // =============================
-    // ❌ NOT FOUND
-    // =============================
-    return jsonResponse(404, { error: "Route not found" });
-
-  } catch (err) {
-    console.error("Unhandled error:", err);
-    return jsonResponse(500, { error: "Internal server error" });
+  } catch (error) {
+    console.error("Lambda error:", error);
+    return response(500, "Internal Server Error");
   }
 };
+
+// Helper
+function response(statusCode, body) {
+  return {
+    statusCode,
+    headers: { "Content-Type": "text/plain" },
+    body
+  };
+}
