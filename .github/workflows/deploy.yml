@@ -23,8 +23,11 @@ jobs:
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
           aws-region: us-east-1
 
-      - name: Zip function
-        run: zip -r function.zip .
+      #- name: Zip function
+      #  run: zip -r function.zip .
+
+      - name: Debug zip structure
+        run: unzip -l function.zip
 
       - name: Deploy to Lambda
         run: |
