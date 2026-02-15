@@ -40,9 +40,26 @@ exports.handler = async (event) => {
     // ==========================
     // 0️⃣ CHECK CONFIG & STATUS
     // ==========================
-    if (!SHOPIFY_CLIENT_ID || !SHOPIFY_CLIENT_SECRET || !TABLE_NAME) {
+    if (!SHOPIFY_CLIENT_ID || !SHOPIFY_CLIENT_SECRET || !TABLE_NAME || !REDIRECT_URI) {
       console.error("Missing environment variables");
-      return htmlResponse(500, "<h1>Configuration Error</h1><p>Missing required environment variables on server.</p>");
+      return htmlResponse(500, `
+        <h1>Configuration Error</h1>
+        <p>Missing required environment variables on server.</p>
+        <pre>
+Client ID: ${SHOPIFY_CLIENT_ID ? 'OK' : 'MISSING'}
+Client Secret: ${SHOPIFY_CLIENT_SECRET ? 'OK' : 'MISSING'}
+Table Name: ${TABLE_NAME ? 'OK' : 'MISSING'}
+Redirect URI: ${REDIRECT_URI ? 'OK' : 'MISSING'}
+        </pre>
+      `);
+    }
+
+    if (REDIRECT_URI.includes("example.com")) {
+      return htmlResponse(500, `
+            <h1>Configuration Warning</h1>
+            <p>The <code>REDIRECT_URI</code> environment variable is set to <strong>${REDIRECT_URI}</strong>, which appears to be a placeholder.</p>
+            <p>Please update it to your actual API Gateway URL + <code>/callback</code>.</p>
+        `);
     }
 
     if (path === "/" || path === "") {
@@ -76,8 +93,8 @@ exports.handler = async (event) => {
       const isInstalled = !!session && !!session.accessToken;
 
       if (!isInstalled) {
-         // Not installed: Redirect to Auth
-         return redirect(`/auth?shop=${shop}`);
+        // Not installed: Redirect to Auth
+        return redirect(`/auth?shop=${shop}`);
       }
 
       // APP IS INSTALLED & RUNNING
