@@ -1,10 +1,24 @@
-import crypto from "crypto";
-import fetch from "node-fetch";
-import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { DynamoDBDocumentClient, PutCommand, GetCommand } from "@aws-sdk/lib-dynamodb";
+const crypto = require("crypto");
+const fetch = require("node-fetch");
+const {
+  DynamoDBClient
+} = require("@aws-sdk/client-dynamodb");
+const {
+  DynamoDBDocumentClient,
+  PutCommand,
+  GetCommand
+} = require("@aws-sdk/lib-dynamodb");
 
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+// ==============================
+// AWS DynamoDB
+// ==============================
+const ddb = DynamoDBDocumentClient.from(
+  new DynamoDBClient({})
+);
 
+// ==============================
+// ENV VARIABLES
+// ==============================
 const {
   SHOPIFY_CLIENT_ID,
   SHOPIFY_CLIENT_SECRET,
@@ -13,18 +27,25 @@ const {
   TABLE_NAME
 } = process.env;
 
-export const handler = async (event) => {
+// ==============================
+// MAIN HANDLER
+// ==============================
+exports.handler = async (event) => {
   try {
     const path = event.rawPath;
+    const query = event.queryStringParameters || {};
 
-    // =============================
+    console.log("PATH:", path);
+    console.log("QUERY:", query);
+
+    // ==========================
     // 1️⃣ AUTH
-    // =============================
+    // ==========================
     if (path === "/auth") {
-      const shop = event.queryStringParameters?.shop;
+      const shop = query.shop;
 
       if (!shop) {
-        return response(400, "Missing shop param");
+        return response(400, "Missing shop parameter");
       }
 
       const state = crypto.randomBytes(16).toString("hex");
@@ -36,41 +57,25 @@ export const handler = async (event) => {
         `&redirect_uri=${encodeURIComponent(REDIRECT_URI)}` +
         `&state=${state}`;
 
-      return {
-        statusCode: 302,
-        headers: { Location: installUrl }
-      };
+      return redirect(installUrl);
     }
 
-    // =============================
+    // ==========================
     // 2️⃣ CALLBACK
-    // =============================
+    // ==========================
     if (path === "/callback") {
-      const { shop, code, hmac } = event.queryStringParameters;
+      const { shop, code, hmac } = query;
 
       if (!shop || !code || !hmac) {
         return response(400, "Missing required parameters");
       }
 
-      // 🔐 Validar HMAC
-      const map = { ...event.queryStringParameters };
-      delete map.hmac;
-
-      const message = Object.keys(map)
-        .sort()
-        .map(key => `${key}=${map[key]}`)
-        .join("&");
-
-      const generatedHash = crypto
-        .createHmac("sha256", SHOPIFY_CLIENT_SECRET)
-        .update(message)
-        .digest("hex");
-
-      if (generatedHash !== hmac) {
+      // 🔐 Validate HMAC
+      if (!validateHmac(query)) {
         return response(400, "HMAC validation failed");
       }
 
-      // 🔄 Intercambiar code por token
+      // 🔄 Exchange code for token
       const tokenResponse = await fetch(
         `https://${shop}/admin/oauth/access_token`,
         {
@@ -87,34 +92,33 @@ export const handler = async (event) => {
       const rawText = await tokenResponse.text();
 
       if (!tokenResponse.ok) {
-        console.error("Shopify token error:", rawText);
-        return response(500, `Token exchange failed: ${rawText}`);
+        console.error("Token exchange error:", rawText);
+        return response(500, rawText);
       }
 
       let tokenData;
       try {
         tokenData = JSON.parse(rawText);
       } catch (err) {
-        console.error("Invalid JSON from Shopify:", rawText);
-        return response(500, "Invalid JSON returned from Shopify");
+        console.error("Invalid JSON:", rawText);
+        return response(500, "Invalid JSON from Shopify");
       }
 
       const accessToken = tokenData.access_token;
 
       if (!accessToken) {
-        return response(500, "No access_token returned");
+        return response(500, "No access token returned");
       }
 
-      // 💾 Guardar en DynamoDB
+      // 💾 Save in DynamoDB
       await ddb.send(
         new PutCommand({
           TableName: TABLE_NAME,
           Item: {
             id: `offline_${shop}`,
-            accessToken,
             shop,
+            accessToken,
             scope: SHOPIFY_SCOPES,
-            isOnline: false,
             installedAt: Date.now()
           }
         })
@@ -123,19 +127,111 @@ export const handler = async (event) => {
       return response(200, "App instalada correctamente");
     }
 
-    return response(404, "Not found");
+    // ==========================
+    // 3️⃣ PRODUCTS ENDPOINT
+    // ==========================
+    if (path === "/products") {
+      const shop = query.shop;
+
+      if (!shop) {
+        return response(400, "Missing shop parameter");
+      }
+
+      const session = await getSession(shop);
+
+      if (!session) {
+        return response(404, "Shop not installed");
+      }
+
+      const shopifyResponse = await fetch(
+        `https://${shop}/admin/api/2024-10/products.json`,
+        {
+          headers: {
+            "X-Shopify-Access-Token": session.accessToken,
+            "Content-Type": "application/json"
+          }
+        }
+      );
+
+      const rawText = await shopifyResponse.text();
+
+      if (!shopifyResponse.ok) {
+        console.error("Shopify API error:", rawText);
+        return response(500, rawText);
+      }
+
+      return jsonResponse(200, JSON.parse(rawText));
+    }
+
+    return response(404, "Not Found");
 
   } catch (error) {
-    console.error("Lambda error:", error);
+    console.error("Unhandled error:", error);
     return response(500, "Internal Server Error");
   }
 };
 
-// Helper
+// ==============================
+// HELPERS
+// ==============================
+
+function validateHmac(params) {
+  const { hmac, ...rest } = params;
+
+  const message = Object.keys(rest)
+    .sort()
+    .map(key => `${key}=${rest[key]}`)
+    .join("&");
+
+  const generatedHash = crypto
+    .createHmac("sha256", SHOPIFY_CLIENT_SECRET)
+    .update(message)
+    .digest("hex");
+
+  return crypto.timingSafeEqual(
+    Buffer.from(generatedHash),
+    Buffer.from(hmac)
+  );
+}
+
+async function getSession(shop) {
+  const result = await ddb.send(
+    new GetCommand({
+      TableName: TABLE_NAME,
+      Key: {
+        id: `offline_${shop}`
+      }
+    })
+  );
+
+  return result.Item;
+}
+
 function response(statusCode, body) {
   return {
     statusCode,
-    headers: { "Content-Type": "text/plain" },
+    headers: {
+      "Content-Type": "text/plain"
+    },
     body
+  };
+}
+
+function jsonResponse(statusCode, data) {
+  return {
+    statusCode,
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(data)
+  };
+}
+
+function redirect(location) {
+  return {
+    statusCode: 302,
+    headers: {
+      Location: location
+    }
   };
 }
